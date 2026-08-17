@@ -20,8 +20,6 @@ namespace SilksongRL
         public EpisodeState CurrentState { get; private set; }
 
         private IBossEncounter encounter;
-        
-        private int previousHeroHealth = 10;
 
         // TO DO 
         // MAKE STUCK STEP THRESHOLD CONFIGURABLE BY EACH ENCOUNTER
@@ -30,15 +28,25 @@ namespace SilksongRL
         
         private bool hasTriggeredReset = false;
         private bool hasPressedF5 = false;
+        private bool bossSeenThisEpisode = false;
+        //假如我需要同时循环训练多个boss，则游戏内的切换boss逻辑需要依赖于不止一个F5
+        //可能需要更多按键
         private float resetSequenceStartTime = 0f;
-        private float resetDelayDuration = 0.5f; // Delay before pressing F5
+        private float f5PressTime = 0f;
+        private int f5PressAttempts = 0;
+        private const float DefaultResetDelayDuration = 1.0f;
+        private const float HeroDeathResetDelayDuration = 4.5f;
+        private const float ResetSettleDuration = 2.5f;
+        private const float DefaultF5RetryInterval = 5f;
+        private readonly float f5RetryInterval;
 
         public System.Action<KeyCode> OnSimulateKeyPress;
         public System.Action OnResetComplete;
 
-        public TrainingEpisodeManager(IBossEncounter encounter)
+        public TrainingEpisodeManager(IBossEncounter encounter, float f5RetryInterval = DefaultF5RetryInterval)
         {
             this.encounter = encounter;
+            this.f5RetryInterval = Mathf.Max(2.5f, f5RetryInterval);
             CurrentState = EpisodeState.Training;
         }
 
@@ -51,10 +59,29 @@ namespace SilksongRL
             if (hero == null)
                 return;
 
-            int currentHeroHealth = hero.playerData.health;
+            if (boss != null)
+            {
+                bossSeenThisEpisode = true;
+            }
 
             if (CurrentState == EpisodeState.Training)
             {
+                if ((boss == null && bossSeenThisEpisode) || (boss != null && boss.hp <= 0))
+                {
+                    CurrentState = EpisodeState.BossDead;
+                    RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Boss defeated detected");
+                    consecutiveStuckSteps = 0;
+                    return;
+                }
+
+                if (IsHeroDead(hero))
+                {
+                    CurrentState = EpisodeState.HeroDead;
+                    RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Hero death detected");
+                    consecutiveStuckSteps = 0;
+                    return;
+                }
+
                 if (encounter.IsHeroStuck(hero))
                 {
                     consecutiveStuckSteps++;
@@ -69,32 +96,7 @@ namespace SilksongRL
                 {
                     consecutiveStuckSteps = 0;
                 }
-
-                // If the boss is null, it means the boss has died
-                // This is a guarantee as with the new SaveState respawn
-                // handling the boss does not go null in between as it did before
-                if (boss == null)
-                {
-                    CurrentState = EpisodeState.BossDead;
-                    RLManager.StaticLogger?.LogInfo($"[TrainingEpisodeManager] Boss died detected - boss is null");
-                    consecutiveStuckSteps = 0; // Reset stuck counter on death
-                }
-                // If the hero's health has increased AND the boss is at max HP, 
-                // it means the hero has died. 
-                // NOTE: This would work even with an action space that has healing
-                // since for the hero to be able to heal, they must have dealt some
-                // damage to the boss first. (This is not true if you start the encounter
-                // with full silk. So like. Don't do that. This might also not work with 
-                // bosses like First Sinner that can heal but I don't care right now)
-                else if (previousHeroHealth < currentHeroHealth && boss.hp == encounter.GetMaxHP())
-                {
-                    CurrentState = EpisodeState.HeroDead;
-                    RLManager.StaticLogger?.LogInfo($"[TrainingEpisodeManager] Hero died detected - health jumped from {previousHeroHealth} to {currentHeroHealth} and boss is at max HP");
-                }
             }
-
-
-            previousHeroHealth = currentHeroHealth;
         }
 
         /// <summary>
@@ -105,14 +107,13 @@ namespace SilksongRL
             switch (CurrentState)
             {
                 case EpisodeState.HeroDead:
-                    ResetEpisode();
-                    return true;
+                    return HandleReloadReset(hero, boss, "Hero died", HeroDeathResetDelayDuration);
 
                 case EpisodeState.BossDead:
-                    return HandleDeathReset(hero, boss, "Boss defeated");
+                    return HandleReloadReset(hero, boss, "Boss defeated", DefaultResetDelayDuration);
 
                 case EpisodeState.HeroStuck:
-                    return HandleStuckReset(hero, boss);
+                    return HandleReloadReset(hero, boss, "Hero stuck", DefaultResetDelayDuration);
 
                 default:
                     return false;
@@ -127,72 +128,71 @@ namespace SilksongRL
             CurrentState = EpisodeState.Training;
             hasTriggeredReset = false;
             hasPressedF5 = false;
-            previousHeroHealth = 10;
+            bossSeenThisEpisode = false;
             consecutiveStuckSteps = 0;
+            f5PressTime = 0f;
+            f5PressAttempts = 0;
             
             RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Episode reset complete, resuming training");
             
             OnResetComplete?.Invoke();
         }
 
-        private bool HandleDeathReset(HeroController hero, HealthManager boss, string reason)
+        private bool HandleReloadReset(HeroController hero, HealthManager boss, string reason, float resetDelayDuration)
         {
             if (!hasTriggeredReset)
             {
                 hasTriggeredReset = true;
-                resetSequenceStartTime = Time.time;
+                resetSequenceStartTime = Time.unscaledTime;
                 RLManager.StaticLogger?.LogInfo($"[TrainingEpisodeManager] {reason} - starting automatic reset sequence...");
             }
-            
-            // Wait for delay, then press reset (F5)
-            // Delay is necessary because immediate press would often break the game
-            if (hasTriggeredReset && Time.time - resetSequenceStartTime >= resetDelayDuration)
-            {
-                if (boss != null)
-                {
-                    RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Boss respawned - reset complete");
-                    ResetEpisode();
-                    return false;
-                }
-                
-                // Boss not present yet, press F5 if we haven't recently
-                // (We check every frame but only press once per reset delay period)
-                if (Time.time - resetSequenceStartTime >= resetDelayDuration && 
-                    Time.time - resetSequenceStartTime < resetDelayDuration + 0.1f)
-                {
-                    OnSimulateKeyPress?.Invoke(KeyCode.F5);
-                    RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] F5 pressed");
-                }
-            }
-            
-            return true;
-        }
 
-        private bool HandleStuckReset(HeroController hero, HealthManager boss)
-        {
-            if (!hasTriggeredReset)
-            {
-                hasTriggeredReset = true;
-                resetSequenceStartTime = Time.time;
-                RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Hero stuck - starting automatic reset sequence...");
-            }
-            
-            if (!hasPressedF5 && Time.time - resetSequenceStartTime >= resetDelayDuration)
+            float now = Time.unscaledTime;
+            bool canStartReload = now - resetSequenceStartTime >= resetDelayDuration;
+            bool shouldPressF5 =
+                canStartReload &&
+                (!hasPressedF5 || now - f5PressTime >= f5RetryInterval) &&
+                !IsReloadComplete(hero, boss);
+
+            if (shouldPressF5)
             {
                 OnSimulateKeyPress?.Invoke(KeyCode.F5);
                 hasPressedF5 = true;
-                RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] F5 pressed, waiting for boss respawn...");
+                f5PressTime = now;
+                f5PressAttempts++;
+                RLManager.StaticLogger?.LogInfo($"[TrainingEpisodeManager] F5 pressed (attempt {f5PressAttempts}), waiting for save state reload...");
             }
-            
-            if (hasPressedF5 && boss != null)
+
+            if (hasPressedF5 && now - f5PressTime >= ResetSettleDuration && IsReloadComplete(hero, boss))
             {
-                RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Boss respawned after stuck reset - reset complete");
+                RLManager.StaticLogger?.LogInfo("[TrainingEpisodeManager] Save state reload complete");
                 ResetEpisode();
                 return false;
             }
-            
+
             return true;
         }
-    }
-}
 
+        private bool IsReloadComplete(HeroController hero, HealthManager boss)
+        {
+            if (hero == null || boss == null)
+                return false;
+
+            if (IsHeroDead(hero))
+                return false;
+
+            return boss.hp > 0;
+        }
+
+        private bool IsHeroDead(HeroController hero)
+        {
+            if (hero == null || hero.playerData == null)
+                return false;
+
+            return hero.playerData.health <= 0 ||
+                   hero.cState.dead;
+        }
+    }
+    //这个类强依赖 DebugMod 的 Quickslot Load
+    //在明确DebugMod 的 相关设置前提下才能保证正确更改这里的逻辑
+}

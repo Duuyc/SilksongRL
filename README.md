@@ -1,140 +1,229 @@
-# SilksongRL
+# SilksongRL: Structured-Observation Boss Combat RL
 
-Reinforcement learning system for training AI agents to play Hollow Knight: Silksong boss encounters.
+An experimental reinforcement-learning system that trains an agent against
+bosses in a real Hollow Knight: Silksong game process. A BepInEx mod extracts
+structured game state, computes rewards and action masks, and exchanges steps
+with a Python training backend over a socket connection.
 
-## Encounters
+This repository is a course-project and portfolio extension of
+[jimmie-jams/SilksongRL](https://github.com/jimmie-jams/SilksongRL). It retains
+the upstream Unity/BepInEx foundation and adds a substantially expanded
+observation, action, training, recording, and evaluation stack. See
+[Attribution](#attribution) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-### (✅= Defeated, 🔲= Pending)
+## Results
 
+The final reported Lace Boss1 experiment used the model family
+`lace_boss1_move_offense26_fsmelapsed_frameenc_obs7424` with 26 macro actions,
+a 16-frame structured observation stack, and a 512-dimensional Frame Encoder.
 
+| Metric | Result |
+| --- | ---: |
+| Best 25-episode training-window boss HP remaining | 29.81% |
+| Best 25-episode training-window win rate | 24% |
+| Deterministic evaluation episodes | 100 |
+| Deterministic evaluation win rate | 11% |
+| Deterministic evaluation mean boss HP remaining | 34.02% |
 
-<br>
+These numbers describe one real-game experiment, not a claim of a fully solved
+or universally reproducible boss encounter. Game timing, save-state setup,
+hardware, mod versions, and random boss behavior all affect results.
 
-✅ [**Lace 1**](https://www.youtube.com/watch?v=TSNdgidVWeY) 
+**Gameplay demo:** [Silksong reinforcement-learning agent vs. Lace Boss1
+(Bilibili)](https://www.bilibili.com/video/BV1hSJ36TEe7/)
 
-([model checkpoint](https://drive.google.com/drive/folders/1cKgxRb4KAvJV66gcvnV-Ai7aePXuyngR?usp=sharing))
+## System Architecture
 
-<img width="1920" height="1080" alt="THUMBNAIL" src="https://github.com/user-attachments/assets/5babba46-4ce9-4d57-9888-58e99de16125" />
+```text
+Silksong / Unity
+      |
+      v
+BepInEx + Harmony patches
+  - structured observations
+  - rewards and action masks
+  - episode/reset logic
+      |
+      v
+socket protocol  <---->  Python training backend
+                         - Maskable PPO (default)
+                         - Dueling Double DQN experiment
+                         - Frame Encoder
+                         - BC and future prediction tools
+      |
+      v
+26 high-level options -> ActionManager -> key-level game input
+```
 
-🔲 **Lace 2**
+## Main Extensions in This Fork
 
-🔲 **Savage Beastfly**
+- **26-option macro action space:** six movement/defense semantics combined
+  with no attack, horizontal slash, anti-air slash, or ranged tool, plus close
+  skill and bind/heal actions.
+- **Structured temporal observations:** kinematics, resources, semantic FSM
+  flags, FSM elapsed time, 32 raycasts, and collider/hitbox features.
+- **Frame Encoder:** a shared per-frame MLP compresses each frame before a
+  temporal MLP produces a 512-dimensional policy feature.
+- **Maskable PPO:** environment-side masks remove actions that are invalid or
+  clearly unsafe in the current state.
+- **Behavior cloning:** human `.jsonl` demonstrations can warm-start the policy
+  before online RL.
+- **Optional future predictor:** predicts short-horizon boss displacement,
+  danger, punish windows, and semantic FSM flags.
+- **Experimental DQN backend:** dueling Double DQN with prioritized replay,
+  n-step returns, and elite replay support.
+- **Training support:** running reward normalization, best-checkpoint selection,
+  rollback, deterministic evaluation statistics, and agent trace recording.
+- **Debug tooling:** `F6` demonstration recording, `F7` collider logging, and
+  `F8` boss FSM logging.
+- **Standard benchmark:** an ALE/Pong RAM training script provides a lightweight
+  sanity check outside the game integration.
 
-## Overview
+## Repository Layout
 
-This project combines a Unity mod with a Python-based RL training pipeline to teach agents how to fight bosses using PPO (Proximal Policy Optimization). Still working on extending this to other RL algorithms.
+```text
+python-client/                 Python socket server and RL training code
+  rl_core.py                   Maskable PPO lifecycle and inference
+  dqn_core.py                  Experimental DQN backend
+  frame_encoder.py             Structured temporal feature extractor
+  demo_dataset.py              Demonstration parsing and action mapping
+  train_bc.py                  PPO behavior-cloning warm start
+  future_predictor.py          Short-horizon prediction model/runtime
+  train_future_predictor.py    Predictor training and validation
+  train_pong_ram_benchmark.py  ALE/Pong RAM benchmark
+unity-mod/SilksongRL/          BepInEx plugin and encounter definitions
+option-action-list.md          Macro-action reference
+HOW_TO_TRAIN.md                End-to-end runtime workflow
+```
 
-**Components:**
-- **unity-mod/** - BepInEx mod that hooks into Silksong, captures game state, and executes agent actions
-- **python-client/** - Socket server that runs training for models and provides action predictions
+Generated demonstrations, checkpoints, predictor weights, traces, logs, game
+files, and save states are intentionally excluded from Git.
 
-## Architecture
+## Prerequisites
 
-The Unity mod communicates with the Python socket server:
-1. Game state (observations) is sent from Unity to the Python Client
-2. The trained model predicts actions based on the current state
-3. Actions are executed in-game and rewards are calculated
-4. Training data is collected for model improvement
+- A legally obtained Hollow Knight: Silksong installation.
+- [BepInEx 5.4.x for Silksong](https://thunderstore.io/c/hollow-knight-silksong/p/BepInEx/BepInExPack_Silksong/).
+- [Silksong.DebugMod](https://github.com/hk-speedrunning/Silksong.DebugMod)
+  for the save-state reset workflow.
+- Python 3.11.
+- For C# builds: .NET Framework 4.7.2 targeting pack and Visual Studio/MSBuild.
 
-## Set up Instructions
+## Python Setup
 
-### Prerequisites to run training:
+```powershell
+cd python-client
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item server_config.example.json server_config.json
+python launch.py
+```
 
-- **Hollow Knight: Silksong** (game installation)
-- **BepInEx 5.4.x** in your Silksong directory (https://thunderstore.io/c/hollow-knight-silksong/p/BepInEx/BepInExPack_Silksong/)
-- **Debug Mod** in your BepInEx plugins folder (https://github.com/hk-speedrunning/Silksong.DebugMod)
-- **Python 3.11**
+`server_config.json` selects the socket implementation and training backend:
 
-### (Optional) If you want to build the mod yourself as well you'll also need:
+```json
+{
+  "transport": "socket_sync",
+  "algorithm": "ppo",
+  "host": "localhost",
+  "port": 8000
+}
+```
 
-- **.NET Framework 4.7.2** 
-- **Build system that supports MSBuild projects** (e.g. Visual Studio)
+Use `"algorithm": "dqn"` to run the experimental DQN backend. Maskable PPO is
+the default and is the backend used for the final Lace Boss1 model.
 
+## Build and Install the Unity Mod
 
-### (Optional) Building the Unity Mod
+1. Copy the local project settings template:
 
-1. **Configure your game directory:**
-   ```bash
-   cd unity-mod/SilksongRL
-
-   # PowerShell/Unix:
-   cp SilksongRL.csproj.user.example SilksongRL.csproj.user
-   # CMD:
-   copy SilksongRL.csproj.user.example SilksongRL.csproj.user
+   ```powershell
+   Copy-Item unity-mod\SilksongRL\SilksongRL.csproj.user.example `
+     unity-mod\SilksongRL\SilksongRL.csproj.user
    ```
 
-2. **Edit `SilksongRL.csproj.user`** and set your game installation path:
-   ```xml
-   <GameDir>YOUR_PATH_HERE\Hollow Knight Silksong</GameDir>
-   ```
-   Path Examples:
-   - Steam (Windows): `C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight Silksong`
-   - Steam (custom drive): `D:\Steam\steamapps\common\Hollow Knight Silksong`
-   - GOG: `C:\GOG Games\Hollow Knight Silksong`
-   - Epic Games: `C:\Program Files\Epic Games\Hollow Knight Silksong`
+2. Edit `SilksongRL.csproj.user` and set `GameDir` to your game installation.
+   You may instead set the `SILKSONG_GAME_DIR` environment variable.
 
-3. **Build the project:**
-   
-   In Visual Studio:
-   - Open `unity-mod/SilksongRL.sln`
-   - Build Solution (Ctrl+Shift+B)
+3. Build `unity-mod/SilksongRL.sln` in Visual Studio or with MSBuild.
 
+4. Copy the generated `SilksongRL.dll` into the active profile's
+   `BepInEx/plugins/` directory.
 
-### Installing the mod
+The project references BepInEx and game-managed assemblies from your local game
+directory. Those proprietary/runtime binaries are not included here.
 
-   - Copy the built `SilksongRL.dll` and from `unity-mod/SilksongRL/bin/Debug/` (or `bin/Release/` if you built in Release configuration) to your game's `BepInEx/plugins/` directory (or the realease if you downloaded that instead)
+## Run Training
 
+The complete game, save-state, server, and hotkey workflow is documented in
+[HOW_TO_TRAIN.md](HOW_TO_TRAIN.md). In short:
 
-### Setting Up the Python Client
+1. Prepare a boss save state and bind DebugMod quick-load to `F5`.
+2. Start `python-client/launch.py`.
+3. Start the game and enter the configured encounter.
+4. Press `P` to enable agent control.
 
-1. **Navigate to the Python Client directory:**
-   ```bash
-   cd python-client
-   ```
+The BepInEx file `BepInEx/config/silksongrl.cfg` controls the encounter,
+sampling interval, fixed-step mode, evaluation mode, and recorder output.
 
-2. **Create a virtual environment (recommended):**
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate # On Unix: source venv/bin/activate
-   ```
+## Behavior Cloning and Predictor Training
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+Record human play with `F6` while agent control is disabled, then run:
 
-4. **Run the socket server:**
-   ```bash
-   python launch.py
-   ```
+```powershell
+cd python-client
+python train_bc.py --demo-dir demos\lace_1 --boss-name "Lace Boss1" `
+  --epochs 40 --respect-masks
+```
 
-## Running the System
+Inspect all available weighting and dataset options with:
 
-Please consult [HOW_TO_TRAIN.md](/HOW_TO_TRAIN.md)
+```powershell
+python train_bc.py --help
+python train_future_predictor.py --help
+python train_dqn_bc.py --help
+```
 
+The online PPO behavior-cloning regularizer and future predictor are disabled
+by default. They can be enabled through the `SILKSONGRL_BC_COEF` and
+`SILKSONGRL_FUTURE_PREDICTOR` environment variables after compatible local
+data/model files have been prepared.
 
-## Future plans
+## ALE/Pong RAM Sanity Check
 
-- **Screen Capture overhaul**: Currently, visual observations are captured from the entire screen. This includes UI. I'm sure there's a way to have it ignore the UI entirely. This would be very beneficial, as we can keep Debug UI on and also don't have to worry about whether we're capturing Hornet's masks or anything else.
+```powershell
+cd python-client
+python train_pong_ram_benchmark.py --help
+```
 
-- **Ping meter**: Just a small (toggleable?) counter on some corner of the screen. Would be helpful to understand the performance on different machines and different TimeScales.
+This benchmark checks whether the PPO and temporal encoder stack can learn in a
+standard RAM-observation task. It is a sanity check, not a substitute for
+Silksong boss evaluation.
 
-- **Action visualization**: Either with a simple custon keyviz-like visualizer or something that looks like NN nodes with the selected actions flashing (Honestly, not sure if this will look too great because of just how often actions are taken but we'll see).
+## Configuration Notes
 
-- **Savage Beastfly overhaul**: Savage Beastfly has summons but those are not explicitly accounted for by either the state or reward definition. For the state this may be fine as the agent can still see them through the visual component, but reward should definitely be given on hitting/killing them.
+- Final experiments used `StepInterval = 0.05` and
+  `DecisionInterval = 0.05` seconds.
+- `EvalMode = true` uses deterministic inference and does not store training
+  transitions. Evaluation summaries are printed every `EvalStatsWindow`
+  episodes.
+- PPO checkpoints are written below `python-client/models/`; DQN checkpoints
+  use `python-client/dqn_models/`. Both directories are ignored by Git.
+- The Python defaults can be overridden with `SILKSONGRL_*` environment
+  variables defined near the top of `rl_core.py` and `dqn_core.py`.
 
-- **Link in game name to "real" name**: Bosses have an in game name that is usually not the same as the one people might be familiar with. For instance, Savage Beatsfly's name in the code is Bone Flyer Giant. It may be a good idea to link the in game name to the expected name and only show that to people so they don't get confused.
+## Attribution
 
-- **Configurable key bindings**: The agent plays by pressing buttons. Many people do not use the default bindings so if they want to use this they'd have to change them to the default and then back so they can play. Either the key bindings should be manually configurable by the player in silksongrl.cfg or, even better, it should automatically detect the user's keybinds and use those. 
+This is a fork of [jimmie-jams/SilksongRL](https://github.com/jimmie-jams/SilksongRL),
+distributed under the MIT License. The original copyright notice is retained.
+The structured-observation pipeline, macro-action system, temporal encoder,
+behavior-cloning and prediction utilities, alternative DQN experiments, and
+training/evaluation extensions in this fork were developed as a course project
+and portfolio implementation.
 
-- **Untie reward saving from checkpoints**: The rewards a model gets during training (and episode count, times trained count etc.) are saved within the checkpoint itself. I honestly don't remember *why* I did it like that, maybe I wanted to keep things more compact. At any rate, that seems silly to me right now. A separate json to store and load this info would probably be better (?) and would also mean that the monstrosity that is the load function override can be removed.
+This project is unofficial and is not affiliated with or endorsed by Team
+Cherry. It does not distribute game assets or binaries.
 
-- **Named checkpoints**: Probably should have the actual checkpoint zip have a name rather than simply being called checkpoint. (Lace1.zip, Lace2.zip etc.)
+## License
 
-- **More bosses**: Adding new bosses is always on the menu. Check out [this PR](https://github.com/jimmie-jams/SilksongRL/pull/2) to get an idea of how it's done. The general idea is you simply need to implement the IBossEncounter interface for another boss.
-
-- **More algorithms**: Not too high priority for now, but trying out more RL algorithms would be cool.
-
-
-
-
+MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

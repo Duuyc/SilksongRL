@@ -22,6 +22,7 @@ namespace SilksongRL
     public class StateRequest
     {
         public float[] state;
+        public int[] action_mask;
     }
 
     [Serializable]
@@ -35,8 +36,12 @@ namespace SilksongRL
     {
         public float[] state;
         public int[] action;
+        public int[] teacher_action;
         public float reward;
+        public float[] reward_components;
         public float[] next_state;
+        public int[] action_mask;
+        public int[] next_action_mask;
         public bool done;
     }
 
@@ -50,6 +55,7 @@ namespace SilksongRL
         public int vector_obs_size;      // Size of vector portion (for hybrid, this is before visual data)
         public int visual_width;         // Width of visual observation (0 if vector-only)
         public int visual_height;        // Height of visual observation (0 if vector-only)
+        public bool eval_mode;
     }
 
     [Serializable]
@@ -157,7 +163,7 @@ namespace SilksongRL
             }
         }
 
-        public async Task<InitResponse> InitializeAsync(string bossName, int observationSize, int[] actionSpaceShape, ObservationType observationType, int vectorObsSize, int visualWidth = 0, int visualHeight = 0)
+        public async Task<InitResponse> InitializeAsync(string bossName, int observationSize, int[] actionSpaceShape, ObservationType observationType, int vectorObsSize, int visualWidth = 0, int visualHeight = 0, bool evalMode = false)
         {
             await socketLock.WaitAsync().ConfigureAwait(false);
             try
@@ -172,7 +178,8 @@ namespace SilksongRL
                     observation_type = observationType == ObservationType.Hybrid ? "hybrid" : "vector",
                     vector_obs_size = vectorObsSize,
                     visual_width = visualWidth,
-                    visual_height = visualHeight
+                    visual_height = visualHeight,
+                    eval_mode = evalMode
                 };
 
                 string json = JsonUtility.ToJson(request);
@@ -206,22 +213,26 @@ namespace SilksongRL
             }
         }
 
-        public async Task<Action> GetActionAsync(float[] observations)
+        public async Task<Action> GetActionAsync(float[] observations, int[] actionMask)
         {
             // Acquire lock to prevent concurrent socket operations
-            await socketLock.WaitAsync().ConfigureAwait(false);
+            await socketLock.WaitAsync();
             try
             {
-                if (!await EnsureConnectedAsync().ConfigureAwait(false)) return null;
+                if (!await EnsureConnectedAsync()) return null;
 
-                StateRequest request = new StateRequest { state = observations };
+                StateRequest request = new StateRequest
+                {
+                    state = observations,
+                    action_mask = actionMask
+                };
                 string json = JsonUtility.ToJson(request);
 
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
                 
-                await SendMessageAsync(MessageType.GetAction, json).ConfigureAwait(false);
+                await SendMessageAsync(MessageType.GetAction, json);
 
-                var (msgType, responseJson) = await ReceiveMessageAsync().ConfigureAwait(false);
+                var (msgType, responseJson) = await ReceiveMessageAsync();
                 
                 stopwatch.Stop();
                 lastPingMs = (float)stopwatch.Elapsed.TotalMilliseconds * Time.timeScale;
@@ -229,7 +240,7 @@ namespace SilksongRL
                 if (msgType == MessageType.ActionResponse)
                 {
                     ActionResponse response = JsonUtility.FromJson<ActionResponse>(responseJson);
-                    return ActionManager.ArrayToAction(response, RLManager.CurrentActionSpaceType);
+                    return ActionManager.ArrayToAction(response);
                 }
                 else if (msgType == MessageType.Error)
                 {
@@ -257,7 +268,16 @@ namespace SilksongRL
             }
         }
 
-        public async Task<bool> StoreTransitionAsync(float[] observations, Action action, float reward, float[] nextObservations, bool done)
+        public async Task<bool> StoreTransitionAsync(
+            float[] observations,
+            Action action,
+            int[] actionMask,
+            int[] nextActionMask,
+            int[] teacherAction,
+            float reward,
+            RewardComponents rewardComponents,
+            float[] nextObservations,
+            bool done)
         {
             // Acquire lock to prevent concurrent socket operations
             await socketLock.WaitAsync().ConfigureAwait(false);
@@ -268,9 +288,13 @@ namespace SilksongRL
                 TransitionRequest request = new TransitionRequest
                 {
                     state = observations,
-                    action = ActionManager.ActionToArray(action, RLManager.CurrentActionSpaceType),
+                    action = ActionManager.ActionToArray(action),
+                    teacher_action = teacherAction,
                     reward = reward,
+                    reward_components = rewardComponents != null ? rewardComponents.ToArray() : new RewardComponents().ToArray(),
                     next_state = nextObservations,
+                    action_mask = actionMask,
+                    next_action_mask = nextActionMask,
                     done = done
                 };
 
@@ -418,5 +442,11 @@ namespace SilksongRL
         }
 
     }
+    //Unity 的 JsonUtility 适合简单字段类。这里的数据结构都很简单
+    //所以可以用。
+    //但如果以后想传 Dictionary、嵌套复杂对象，JsonUtility 可能不支持，需要换 Newtonsoft.Json 或自定义序列化。
+    //JSON 传大数组效率不高
+    //可能成为瓶颈
+    //此处优化优先级不高
 }
 

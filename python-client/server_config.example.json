@@ -1,0 +1,6 @@
+{
+  "transport": "socket_sync",
+  "algorithm": "ppo",
+  "host": "localhost",
+  "port": 8000
+}
