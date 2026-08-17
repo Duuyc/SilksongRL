@@ -1,5 +1,7 @@
 stable-baselines3
+sb3-contrib
 gymnasium
 numpy
 torch
 matplotlib
+ale-py

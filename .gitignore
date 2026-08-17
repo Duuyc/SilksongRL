@@ -1,10 +1,35 @@
 .vs/
+.idea/
+.vscode/
 
 [Bb]in/
 [Oo]bj/
-
 *.csproj.user
+*.suo
+*.dll
+*.pdb
 
 __pycache__/
+*.py[cod]
 .venv/
-models/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local runtime configuration and generated RL artifacts
+python-client/server_config.json
+python-client/models/
+python-client/dqn_models/
+python-client/predictors/
+python-client/demos/
+python-client/demos_stack8_backup/
+python-client/agent_traces/
+python-client/silksongrl_shared_memory.bin
+python-client/benchmarks/**/logs/
+python-client/benchmarks/**/best_model.zip
+python-client/benchmarks/**/latest_model.zip
+
+outputs/
+tmp/
+*.log
+*.tmp

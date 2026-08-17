@@ -13,7 +13,7 @@ from enum import IntEnum
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
 
-from rl_core import (
+from training_backend import (
     initialize_model,
     get_action as rl_get_action,
     store_transition as rl_store_transition,
@@ -123,9 +123,11 @@ class AsyncRLSocketServer:
         vector_obs_size = payload.get('vector_obs_size', obs_size)
         visual_width = payload.get('visual_width', 0)
         visual_height = payload.get('visual_height', 0)
+        eval_mode = payload.get('eval_mode', False)
         
         print(f"[AsyncSocketServer] Initializing for boss: {boss_name}")
         print(f"[AsyncSocketServer]   Observation size: {obs_size}, type: {observation_type}, vector size: {vector_obs_size}")
+        print(f"[AsyncSocketServer]   Eval mode: {eval_mode}")
         if observation_type == 'hybrid':
             print(f"[AsyncSocketServer]   Visual size: {visual_width}x{visual_height}")
         
@@ -136,7 +138,8 @@ class AsyncRLSocketServer:
             observation_type=observation_type,
             vector_obs_size=vector_obs_size,
             visual_w=visual_width,
-            visual_h=visual_height
+            visual_h=visual_height,
+            is_eval=eval_mode
         )
 
         response = {
@@ -149,7 +152,8 @@ class AsyncRLSocketServer:
 
     async def handle_get_action(self, payload: Dict[str, Any], writer: asyncio.StreamWriter):
         state = payload['state']
-        action = rl_get_action(state)
+        action_mask = payload.get('action_mask')
+        action = rl_get_action(state, action_mask)
         response = {'action': action}
         await self.send_message(writer, MessageType.ACTION_RESPONSE, response)
 
@@ -157,8 +161,12 @@ class AsyncRLSocketServer:
         state = payload['state']
         action = payload['action']
         reward = payload['reward']
+        reward_components = payload.get('reward_components')
         next_state = payload['next_state']
+        action_mask = payload.get('action_mask')
+        next_action_mask = payload.get('next_action_mask')
+        teacher_action = payload.get('teacher_action')
         done = payload['done']
 
-        rl_store_transition(state, action, reward, next_state, done)
+        rl_store_transition(state, action, reward, next_state, done, action_mask, next_action_mask, reward_components, teacher_action)
         await self.send_message(writer, MessageType.TRANSITION_ACK, {'success': True})

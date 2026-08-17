@@ -1,304 +1,462 @@
-using HutongGames.PlayMaker;
+using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace SilksongRL
 {
     /// <summary>
     /// Boss encounter configuration for Lace 1.
-    /// Contains all Lace-specific logic including state extraction, normalization, and reset behavior.
     /// </summary>
-    public class LaceEncounter : IBossEncounter
+    public class LaceEncounter : BossEncounterBase
     {
-        // Normalization constants (based on observed gameplay data for Lace arena)
-        private const float MIN_POS_X = 77.5f;           // X positions range ~78-110
-        private const float MAX_POS_X = 110.5f;
-        private const float MIN_POS_Y = 2f;              // Y positions range ~2-17 (with leeway for pogos)
-        private const float MAX_POS_Y = 25f;
-        private const float MAX_HERO_VELOCITY = 30f;     // Hero velocity range ~-27 to 27
-        private const float MAX_BOSS_VELOCITY = 70f;     // Boss velocity range ~-71 to 71
-        private const float MAX_HERO_HP = 10f;
-        private const float MAX_BOSS_HP = 250f;
-        private const float STUCK_Y_THRESHOLD = 5f;
-        private const string BOSS_NAME = "Lace Boss1";
+        private const int LaceFsmOneHotSize = 48;
+        private const int LaceFsmSemanticSize = 16;
+        private const int LaceFsmElapsedSize = 1;
+        private const int LaceFsmObservationSize = LaceFsmOneHotSize + LaceFsmSemanticSize + LaceFsmElapsedSize;
+        private const int LaceFsmStateSlots = LaceFsmOneHotSize - 1;
+        private const float LaceFsmElapsedNormalizationSeconds = 2f;
 
-        // Attack categories for Lace
-        public enum AttackCategory
+        private static readonly string[] PriorityPrimaryStates =
         {
-            Idle = 0,
-            ComboSlash = 1,
-            Counter = 2,
-            RapidSlash = 3,
-            JSlash = 4,
-            Downstab = 5,
-            Charge = 6,
-            Evade = 7,
-            CrossSlash = 8,
-            Stun = 9,
-            Multihit = 10,
+            "Idle",
+            "Charge Antic",
+            "Charge Break",
+            "Charge",
+            "Charge Recover",
+            "ComboSlash 1",
+            "ComboSlash 2",
+            "ComboSlash 3",
+            "ComboSlash 4",
+            "ComboSlash 5",
+            "Counter Antic",
+            "Counter Stance",
+            "Counter Hit",
+            "Counter End",
+            "RapidSlash Charge",
+            "RapidSlash Loop",
+            "RapidSlash End",
+            "J Slash Antic",
+            "J Slash 1",
+            "J Slash 2",
+            "J Slash 3",
+            "J Slash 4",
+            "Downstab Antic",
+            "Downstab",
+            "Downstab Land",
+            "CrossSlash Antic",
+            "CrossSlash",
+            "Slash Slam",
+            "Evade",
+            "Evade Recover",
+            "Evade Move",
+            "Hop Antic",
+            "Hop",
+            "Hop Recover",
+            "Stun Air",
+            "Stunned",
+            "Stun Recover",
+            "Damage Recover",
+            "Pose Swish",
+            "Pose Swish 2",
+            "Tele In",
+            "Tele Out",
+            "Lava Damage",
+            "Start Battle"
+        };
+
+        private HealthManager cachedBoss;
+        private PlayMakerFSM[] cachedFsms;
+        private PlayMakerFSM primaryFsm;
+        private Dictionary<string, int> primaryStateIndices;
+        private string lastPrimaryState;
+        private string trackedPrimaryState;
+        private float primaryStateEnteredTime;
+
+        protected override string BossName => "Lace Boss1";
+        protected override float MinPosX => 77.5f;
+        protected override float MaxPosX => 110.5f;
+        protected override float MinPosY => 2f;
+        protected override float MaxPosY => 25f;
+        protected override float MaxBossHP => 250f;
+        protected override float MaxBossVelocity => 70f;
+        protected override float? LowYWarningThreshold => null;
+        protected override float? LowYDamagePenaltyThreshold => null;
+        protected override float? SafeMinPosX => 81.5f;
+        protected override float? SafeMaxPosX => 105.5f;
+        protected override float SafePlatformMaskMargin => 4f;
+        protected override float SafePlatformWarningMargin => 5f;
+        protected override float SafePlatformPressureMoveInwardReward => 8f;
+        protected override float SafePlatformPressureNoMovePenalty => 3f;
+        protected override bool AllowToolAndSkillActions => false;
+        protected override float AttackRangeMax => 3.3f;
+        protected override float AttackVerticalTolerance => 1.0f;
+        protected override float VerticalAttackHorizontalTolerance => 1.5f;
+        protected override float AttackCreditHitReward => 90f;
+        protected override float AttackSilkGainReward => 57.75f;
+        protected override float AttackOpportunityReward => 12f;
+        protected override float MissedAttackOpportunityPenalty => 17.5f;
+        protected override float EmptyAttackPenalty => 0.15f;
+        protected override float CollisionDangerDistance => 0.85f;
+        protected override float CollisionTacticalDistance => 0.75f;
+        protected override float BossDangerDistance => 4.0f;
+        protected override float BossDangerVerticalTolerance => 2.1f;
+        protected override float GroundRushDodgeDistance => 4.8f;
+        protected override float GroundRushDodgeVerticalTolerance => 1.6f;
+        protected override int BossSpecificObservationSize => LaceFsmObservationSize;
+
+        public override bool ShouldForceBasicAttack()
+        {
+            return false;
         }
 
-        private const int NUM_ATTACK_CATEGORIES = 11;
-        private readonly int vectorObsSize = 10 + NUM_ATTACK_CATEGORIES;
-
-        public string GetEncounterName()
+        public override void ResetObservationHistory()
         {
-            return BOSS_NAME;
+            base.ResetObservationHistory();
+            lastPrimaryState = null;
+            trackedPrimaryState = null;
+            primaryStateEnteredTime = Time.time;
         }
 
-        public ActionSpaceType GetActionSpaceType()
+        protected override void WriteBossSpecificObservations(float[] observations, int offset, HeroController hero, HealthManager boss)
         {
-            return ActionSpaceType.Basic;
+            EnsureFsmCache(boss);
+
+            if (primaryFsm == null || primaryStateIndices == null)
+            {
+                UpdatePrimaryStateTimer("<none>");
+                observations[offset] = 1f;
+                WriteSemanticFlags(observations, offset, "<none>", hero, boss);
+                WritePrimaryStateElapsed(observations, offset);
+                return;
+            }
+
+            string stateName = NormalizeStateName(primaryFsm.ActiveStateName);
+            lastPrimaryState = stateName;
+            UpdatePrimaryStateTimer(stateName);
+
+            int stateIndex;
+            if (!primaryStateIndices.TryGetValue(stateName, out stateIndex) || stateIndex >= LaceFsmStateSlots)
+            {
+                observations[offset] = 1f;
+                WriteSemanticFlags(observations, offset, stateName, hero, boss);
+                WritePrimaryStateElapsed(observations, offset);
+                return;
+            }
+
+            observations[offset + 1 + stateIndex] = 1f;
+            WriteSemanticFlags(observations, offset, stateName, hero, boss);
+            WritePrimaryStateElapsed(observations, offset);
         }
 
-        public ObservationType GetObservationType()
+        protected override bool IsBossAttackOpportunityState()
         {
-            return ObservationType.Vector;
+            return IsBossAttackOpportunityState(GetCurrentPrimaryStateLower());
         }
 
-        public int GetVectorObservationSize()
+        protected override bool IsBossSafeForBindState()
         {
-            return vectorObsSize;
+            return IsBossSafeForBindState(GetCurrentPrimaryStateLower());
         }
 
-        public (int width, int height) GetVisualObservationSize()
+        protected override bool IsBossDangerousState()
         {
-            return (0, 0);
+            return IsBossDangerousState(GetCurrentPrimaryStateLower());
         }
 
-        public bool IsEncounterMatch(HealthManager hm)
+        protected override bool IsBossGroundRushState()
         {
-            return hm != null && hm.name == BOSS_NAME;
+            return IsBossGroundRushState(GetCurrentPrimaryStateLower());
         }
 
-        public float[] ExtractObservationArray(HeroController hero, HealthManager boss)
+        private void EnsureFsmCache(HealthManager boss)
         {
-            if (hero == null || boss == null)
+            if (boss == null)
+                return;
+
+            if (cachedBoss == boss && cachedFsms != null)
+                return;
+
+            cachedBoss = boss;
+            cachedFsms = boss.GetComponentsInChildren<PlayMakerFSM>(true);
+            primaryFsm = SelectPrimaryFsm(cachedFsms);
+            primaryStateIndices = BuildStateIndex(primaryFsm);
+            lastPrimaryState = null;
+            trackedPrimaryState = null;
+            primaryStateEnteredTime = Time.time;
+        }
+
+        private PlayMakerFSM SelectPrimaryFsm(PlayMakerFSM[] fsms)
+        {
+            if (fsms == null || fsms.Length == 0)
                 return null;
 
+            PlayMakerFSM best = null;
+            int bestScore = int.MinValue;
+            foreach (PlayMakerFSM fsm in fsms)
+            {
+                if (fsm == null)
+                    continue;
+
+                int score = ScoreFsm(fsm);
+                if (score > bestScore)
+                {
+                    best = fsm;
+                    bestScore = score;
+                }
+            }
+
+            return best;
+        }
+
+        private int ScoreFsm(PlayMakerFSM fsm)
+        {
+            string name = (SafeName(fsm.FsmName) + " " + SafeName(fsm.name)).ToLowerInvariant();
+            int stateCount = fsm.FsmStates != null ? fsm.FsmStates.Length : 0;
+            int score = Mathf.Min(stateCount, 100);
+
+            score += ContainsAny(name, "lace") ? 60 : 0;
+            score += ContainsAny(name, "boss") ? 40 : 0;
+            score += ContainsAny(name, "control", "main", "attack", "phase", "combat") ? 25 : 0;
+            score -= ContainsAny(name, "audio", "sound", "music", "fx", "effect", "corpse", "title", "camera") ? 50 : 0;
+
+            if (fsm.Active)
+                score += 10;
+
+            return score;
+        }
+
+        private Dictionary<string, int> BuildStateIndex(PlayMakerFSM fsm)
+        {
+            Dictionary<string, int> result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (fsm == null || fsm.FsmStates == null)
+                return result;
+
+            SortedSet<string> stateNames = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var state in fsm.FsmStates)
+            {
+                if (state != null)
+                    stateNames.Add(NormalizeStateName(state.Name));
+            }
+
+            int index = 0;
+            foreach (string priorityState in PriorityPrimaryStates)
+            {
+                if (index >= LaceFsmStateSlots)
+                    break;
+
+                string stateName = NormalizeStateName(priorityState);
+                if (!stateNames.Contains(stateName) || result.ContainsKey(stateName))
+                    continue;
+
+                result[stateName] = index++;
+            }
+
+            foreach (string stateName in stateNames)
+            {
+                if (index >= LaceFsmStateSlots)
+                    break;
+
+                if (!result.ContainsKey(stateName))
+                    result[stateName] = index++;
+            }
+
+            return result;
+        }
+
+        private void WriteSemanticFlags(float[] observations, int offset, string stateName, HeroController hero, HealthManager boss)
+        {
+            int start = offset + LaceFsmOneHotSize;
+            string lowerState = NormalizeStateName(stateName).ToLowerInvariant();
+
+            bool attackOpportunity = IsBossAttackOpportunityState(lowerState);
+            bool safeForBind = IsBossSafeForBindState(lowerState);
+            bool dangerous = IsBossDangerousState(lowerState);
+            bool groundRush = IsBossGroundRushState(lowerState);
+
+            float relX;
+            float relY;
+            float absX;
+            float absY;
+            float distance;
+            bool facingBoss;
+            bool hasGeometry = TryGetGeometry(hero, boss, out relX, out relY, out absX, out absY, out distance, out facingBoss);
+
+            bool bossAboveHero = hasGeometry && relY > 1.0f;
+            bool nearCollision = hasGeometry &&
+                CollisionTacticalDistance > 0f &&
+                distance <= CollisionTacticalDistance;
+            bool nearDangerReach = hasGeometry &&
+                dangerous &&
+                absX <= BossDangerDistance &&
+                absY <= BossDangerVerticalTolerance;
+            bool flatSlashWindow = hasGeometry &&
+                attackOpportunity &&
+                facingBoss &&
+                absX >= AttackRangeMin &&
+                absX <= AttackRangeMax &&
+                absY <= AttackVerticalTolerance;
+            bool verticalSlashWindow = hasGeometry &&
+                attackOpportunity &&
+                relY >= VerticalAttackRangeMin &&
+                relY <= VerticalAttackRangeMax &&
+                absX <= VerticalAttackHorizontalTolerance;
+            bool bindReady = PlayerData.HasInstance &&
+                hero != null &&
+                hero.playerData != null &&
+                hero.playerData.health < Mathf.Max(1, hero.playerData.CurrentMaxHealth) &&
+                PlayerData.instance.silk >= 9;
+            bool safeBindWindow = bindReady &&
+                (safeForBind || (hasGeometry && distance >= SafeBindFarDistanceThreshold));
+
+            bool startup = ContainsAny(lowerState, "antic", "aim", "break", "stance", "wind", "tele in", "rapidslash charge");
+            bool recovery = ContainsAny(lowerState, "recover", "land", "bounce", "slash end", "end", "pose swish");
+            bool stun = ContainsAny(lowerState, "stun", "stunned");
+            bool counterOrParry = ContainsAny(lowerState, "counter", "parry");
+            bool airborneOrTeleport = ContainsAny(lowerState, "air", "jump", "hop", "tele", "j slash", "downstab");
+            bool activeDamage = dangerous &&
+                !startup &&
+                !recovery &&
+                !stun &&
+                ContainsAny(lowerState, "slash", "strike", "hit", "stab", "charge", "circle", "lunge", "dash", "slam");
+
+            observations[start + 0] = dangerous ? 1f : 0f;
+            observations[start + 1] = attackOpportunity ? 1f : 0f;
+            observations[start + 2] = safeForBind ? 1f : 0f;
+            observations[start + 3] = groundRush ? 1f : 0f;
+            observations[start + 4] = bossAboveHero ? 1f : 0f;
+            observations[start + 5] = nearCollision ? 1f : 0f;
+            observations[start + 6] = nearDangerReach ? 1f : 0f;
+            observations[start + 7] = flatSlashWindow ? 1f : 0f;
+            observations[start + 8] = verticalSlashWindow ? 1f : 0f;
+            observations[start + 9] = safeBindWindow ? 1f : 0f;
+            observations[start + 10] = startup ? 1f : 0f;
+            observations[start + 11] = activeDamage ? 1f : 0f;
+            observations[start + 12] = recovery ? 1f : 0f;
+            observations[start + 13] = stun ? 1f : 0f;
+            observations[start + 14] = counterOrParry ? 1f : 0f;
+            observations[start + 15] = airborneOrTeleport ? 1f : 0f;
+        }
+
+        private bool TryGetGeometry(
+            HeroController hero,
+            HealthManager boss,
+            out float relX,
+            out float relY,
+            out float absX,
+            out float absY,
+            out float distance,
+            out bool facingBoss)
+        {
+            relX = 0f;
+            relY = 0f;
+            absX = 0f;
+            absY = 0f;
+            distance = 0f;
+            facingBoss = false;
+
+            if (hero == null || boss == null)
+                return false;
+
             Vector2 heroPos = hero.transform.position;
-            Rigidbody2D heroRb = hero.GetComponent<Rigidbody2D>();
-            Vector2 heroVel = heroRb ? heroRb.velocity : Vector2.zero;
-            int heroHealth = hero.playerData.health;
-
             Vector2 bossPos = boss.transform.position;
-            Rigidbody2D bossRb = boss.GetComponent<Rigidbody2D>();
-            Vector2 bossVel = bossRb ? bossRb.velocity : Vector2.zero;
-            int bossHealth = boss.hp;
+            relX = bossPos.x - heroPos.x;
+            relY = bossPos.y - heroPos.y;
+            absX = Mathf.Abs(relX);
+            absY = Mathf.Abs(relY);
+            distance = Vector2.Distance(heroPos, bossPos);
 
-            AttackCategory attackCategory = AttackCategory.Idle;
-            var fsm = boss.GetComponent<PlayMakerFSM>();
-            if (fsm != null)
-            {
-                attackCategory = MapBossState(fsm.ActiveStateName);
-            }
-
-            // Normalize all values to [0, 1]
-            
-            float heroX = Mathf.Clamp01((heroPos.x - MIN_POS_X) / (MAX_POS_X - MIN_POS_X));
-            float heroY = Mathf.Clamp01((heroPos.y - MIN_POS_Y) / (MAX_POS_Y - MIN_POS_Y));
-            float bossX = Mathf.Clamp01((bossPos.x - MIN_POS_X) / (MAX_POS_X - MIN_POS_X));
-            float bossY = Mathf.Clamp01((bossPos.y - MIN_POS_Y) / (MAX_POS_Y - MIN_POS_Y));
-
-            float heroVelX = Mathf.Clamp01((heroVel.x + MAX_HERO_VELOCITY) / (2f * MAX_HERO_VELOCITY));
-            float heroVelY = Mathf.Clamp01((heroVel.y + MAX_HERO_VELOCITY) / (2f * MAX_HERO_VELOCITY));
-            float bossVelX = Mathf.Clamp01((bossVel.x + MAX_BOSS_VELOCITY) / (2f * MAX_BOSS_VELOCITY));
-            float bossVelY = Mathf.Clamp01((bossVel.y + MAX_BOSS_VELOCITY) / (2f * MAX_BOSS_VELOCITY));
-            
-            float heroHP = Mathf.Clamp01(heroHealth / MAX_HERO_HP);
-            float bossHP = Mathf.Clamp01(bossHealth / MAX_BOSS_HP);
-            
-            float[] attackOneHot = new float[NUM_ATTACK_CATEGORIES];
-            int attackIdx = (int)attackCategory;
-            if (attackIdx >= 0 && attackIdx < NUM_ATTACK_CATEGORIES)
-            {
-                attackOneHot[attackIdx] = 1.0f;
-            }
-            
-            return new float[]
-            {
-                heroX, heroY,
-                heroVelX, heroVelY,
-                heroHP,
-                bossX, bossY,
-                bossVelX, bossVelY,
-                bossHP,
-                attackOneHot[0], attackOneHot[1], attackOneHot[2], attackOneHot[3],
-                attackOneHot[4], attackOneHot[5], attackOneHot[6], attackOneHot[7],
-                attackOneHot[8], attackOneHot[9], attackOneHot[10]
-            };
+            bool bossIsRight = relX >= 0f;
+            bool heroFacingRight = hero.cState.facingRight;
+            facingBoss = bossIsRight ? heroFacingRight : !heroFacingRight;
+            return true;
         }
 
-        public int GetObservationSize()
+        private string GetCurrentPrimaryStateLower()
         {
-            return vectorObsSize;
+            string stateName = primaryFsm != null
+                ? NormalizeStateName(primaryFsm.ActiveStateName)
+                : NormalizeStateName(lastPrimaryState);
+            return stateName.ToLowerInvariant();
         }
 
-        public float CalculateReward(float[] previousObs, float[] currentObs, int whoDied)
+        private bool IsBossAttackOpportunityState(string lowerState)
         {
-            if (previousObs == null || currentObs == null || 
-                previousObs.Length != vectorObsSize || currentObs.Length != vectorObsSize)
-            {
-                return 0f;
-            }
-
-            // 0. Terminal rewards
-            if (whoDied == 0)
-            {
-                return -100f;
-
-            }
-            else if (whoDied == 1)
-            {
-                return 500f;
-            }
-
-            float reward = 0;
-            
-            // Indices: 0-1: hero pos, 2-3: hero vel, 4: hero HP, 5-6: boss pos, 7-8: boss vel, 9: boss HP
-            float prevHeroHP = previousObs[4] * MAX_HERO_HP;
-            float currHeroHP = currentObs[4] * MAX_HERO_HP;
-            float prevBossHP = previousObs[9] * MAX_BOSS_HP;
-            float currBossHP = currentObs[9] * MAX_BOSS_HP;
-            
-            // HP Change Rewards
-            float bossHPLoss = prevBossHP - currBossHP;
-            float heroHPLoss = prevHeroHP - currHeroHP;
-            
-            reward += bossHPLoss * 2.0f;
-            reward -= heroHPLoss * 15.0f;
-
-            // Distance and position-based shaping
-            float prevHeroX = previousObs[0] * (MAX_POS_X - MIN_POS_X) + MIN_POS_X;
-            float prevHeroY = previousObs[1] * (MAX_POS_Y - MIN_POS_Y) + MIN_POS_Y;
-            float prevBossX = previousObs[5] * (MAX_POS_X - MIN_POS_X) + MIN_POS_X;
-            float prevBossY = previousObs[6] * (MAX_POS_Y - MIN_POS_Y) + MIN_POS_Y;
-            
-            float currHeroX = currentObs[0] * (MAX_POS_X - MIN_POS_X) + MIN_POS_X;
-            float currHeroY = currentObs[1] * (MAX_POS_Y - MIN_POS_Y) + MIN_POS_Y;
-            float currBossX = currentObs[5] * (MAX_POS_X - MIN_POS_X) + MIN_POS_X;
-            float currBossY = currentObs[6] * (MAX_POS_Y - MIN_POS_Y) + MIN_POS_Y;
-            
-            Vector2 prevHeroPos = new Vector2(prevHeroX, prevHeroY);
-            Vector2 prevBossPos = new Vector2(prevBossX, prevBossY);
-            Vector2 currHeroPos = new Vector2(currHeroX, currHeroY);
-            Vector2 currBossPos = new Vector2(currBossX, currBossY);
-            
-            float prevDistance = Vector2.Distance(prevHeroPos, prevBossPos);
-            float currDistance = Vector2.Distance(currHeroPos, currBossPos);
-            
-            // Encourage moving closer to boss (but only if not taking damage)
-            if (heroHPLoss == 0)
-            {
-                float distanceChange = prevDistance - currDistance;
-                reward += distanceChange * 0.02f;
-            }
-
-            // Discourage going below 5 (ends up in lava)
-            if (currHeroY < 5f)
-            {
-                reward -= 0.05f;
-            }
-
-            // Discourage running away too far from the boss
-            if (currDistance > 15f)
-            {
-                reward -= 0.05f;
-            }
-            
-            // Survival reward
-            reward += 0.01f;
-            
-            return reward;
+            return ContainsAny(lowerState, "idle", "recover", "stun", "stunned", "land", "bounce back", "slash end", "end", "pose swish");
         }
 
-        /// <summary>
-        /// Maps Lace's FSM state names to attack categories.
-        /// </summary>
-        private AttackCategory MapBossState(string stateName)
+        private bool IsBossSafeForBindState(string lowerState)
         {
-            stateName = stateName?.Trim() ?? "";
-
-            if (string.IsNullOrEmpty(stateName))
-            {
-                return AttackCategory.Idle;
-            }
-
-            if (stateName.StartsWith("Idle") || stateName.StartsWith("Hop") ||
-                stateName.StartsWith("Wallcling") || stateName.StartsWith("Refight"))
-            {
-                return AttackCategory.Idle;
-            }
-
-            if (stateName.StartsWith("ComboSlash") || stateName.StartsWith("Pose"))
-            {
-                return AttackCategory.ComboSlash;
-            }
-
-            if (stateName.StartsWith("Counter"))
-            {
-                return AttackCategory.Counter;
-            }
-
-            if (stateName.StartsWith("RapidSlash"))
-            {
-                return AttackCategory.RapidSlash;
-            }
-
-            if (stateName.StartsWith("J Slash"))
-            {
-                return AttackCategory.JSlash;
-            }
-
-            if (stateName.StartsWith("Downstab"))
-            {
-                return AttackCategory.Downstab;
-            }
-
-            if (stateName.StartsWith("Charge"))
-            {
-                return AttackCategory.Charge;
-            }
-
-            if (stateName.StartsWith("Evade"))
-            {
-                return AttackCategory.Evade;
-            }
-
-            if (stateName.StartsWith("CrossSlash") || stateName.StartsWith("Slash Slam"))
-            {
-                return AttackCategory.CrossSlash;
-            }
-
-            if (stateName.StartsWith("Multihit"))
-            {
-                return AttackCategory.Multihit;
-            }
-
-            if (stateName.StartsWith("Stun"))
-            {
-                return AttackCategory.Stun;
-            }
-
-            RLManager.StaticLogger?.LogWarning($"[LaceEncounter] Unknown boss state: {stateName}, defaulting to Idle");
-            return AttackCategory.Idle;
+            return ContainsAny(lowerState, "idle", "recover", "stun", "stunned", "land", "slash end", "end", "pose swish");
         }
 
-        public bool IsHeroStuck(HeroController hero)
+        private bool IsBossDangerousState(string lowerState)
         {
-            float heroY = hero.transform.position.y;
-            return heroY < STUCK_Y_THRESHOLD;
+            if (IsBossAttackOpportunityState(lowerState))
+                return false;
+
+            return ContainsAny(
+                lowerState,
+                "attack",
+                "slash",
+                "dash",
+                "lunge",
+                "stab",
+                "charge",
+                "strike",
+                "hit",
+                "circle",
+                "downstab",
+                "counter",
+                "slam");
         }
 
-        public ScreenCapture GetScreenCapture()
+        private bool IsBossGroundRushState(string lowerState)
         {
-            return null;
+            if (IsBossAttackOpportunityState(lowerState))
+                return false;
+
+            return ContainsAny(lowerState, "charge", "rapidslash loop", "rapid slash loop", "downstab") ||
+                ContainsAny(lowerState, "comboslash", "combo slash") ||
+                (ContainsAny(lowerState, "run", "walk", "step", "dash", "lunge") &&
+                    ContainsAny(lowerState, "slash", "attack", "strike", "stab"));
         }
 
-        public float GetMaxHP()
+        private void UpdatePrimaryStateTimer(string stateName)
         {
-            return MAX_BOSS_HP;
+            stateName = NormalizeStateName(stateName);
+            if (trackedPrimaryState == stateName)
+                return;
+
+            trackedPrimaryState = stateName;
+            primaryStateEnteredTime = Time.time;
+        }
+
+        private void WritePrimaryStateElapsed(float[] observations, int offset)
+        {
+            float elapsed = Mathf.Max(0f, Time.time - primaryStateEnteredTime);
+            observations[offset + LaceFsmOneHotSize + LaceFsmSemanticSize] =
+                Mathf.Clamp01(elapsed / LaceFsmElapsedNormalizationSeconds);
+        }
+
+        private bool ContainsAny(string value, params string[] tokens)
+        {
+            foreach (string token in tokens)
+            {
+                if (value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private string NormalizeStateName(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "<none>" : value.Trim();
+        }
+
+        private string SafeName(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "<unnamed>" : value.Trim();
         }
     }
-
 }
-

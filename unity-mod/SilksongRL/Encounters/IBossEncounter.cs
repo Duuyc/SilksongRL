@@ -1,7 +1,54 @@
+using System;
 using UnityEngine;
 
 namespace SilksongRL
 {
+    [Serializable]
+    public class RewardComponents
+    {
+        public float damageReward;
+        public float healReward;
+        public float attackReward;
+        public float baseSurvivalReward;
+        public float dodgeReward;
+        public float resourceReward;
+        public float positionReward;
+        public float phaseReward;
+        public float heroDamagePenalty;
+
+        public RewardComponents Clone()
+        {
+            return new RewardComponents
+            {
+                damageReward = damageReward,
+                healReward = healReward,
+                attackReward = attackReward,
+                baseSurvivalReward = baseSurvivalReward,
+                dodgeReward = dodgeReward,
+                resourceReward = resourceReward,
+                positionReward = positionReward,
+                phaseReward = phaseReward,
+                heroDamagePenalty = heroDamagePenalty
+            };
+        }
+
+        public float[] ToArray()
+        {
+            return new[]
+            {
+                damageReward,
+                healReward,
+                attackReward,
+                baseSurvivalReward,
+                dodgeReward,
+                resourceReward,
+                positionReward,
+                phaseReward,
+                heroDamagePenalty
+            };
+        }
+    }
+
     /// <summary>
     /// Observation types for different encounters.
     /// Tells Python how to process the observation array.
@@ -9,9 +56,14 @@ namespace SilksongRL
     public enum ObservationType
     {
         // Vector only: flat array of state values
+        //目前的向量也许太过简单
         Vector,
 
         // Hybrid: [vector_obs | visual_obs] - split and process separately
+        //综合考虑性能，也许截图识别并不是一个较好的选择
+        //当然，如果boss战的场地信息无法通过harmonypatch得到，
+        //则视觉识别是有必要的
+        //再次考虑，假设boss会召唤小怪呢？能用harmonypatch得到吗？
         Hybrid
     }
 
@@ -26,12 +78,6 @@ namespace SilksongRL
         /// Gets the human-readable name of this encounter.
         /// </summary>
         string GetEncounterName();
-
-        /// <summary>
-        /// Gets the action space type for this encounter.
-        /// Some bosses might require more actions to be beatable.
-        /// </summary>
-        ActionSpaceType GetActionSpaceType();
 
         /// <summary>
         /// Gets the observation type for this encounter.
@@ -63,7 +109,42 @@ namespace SilksongRL
         /// This allows each encounter to define its own observation space
         /// (e.g., base observations, projectiles, summons, environmental hazards).
         /// </summary>
+        /// 很重要的函数，决定提取内容，待优化的点：更多参数，返回更多内容
         float[] ExtractObservationArray(HeroController hero, HealthManager boss);
+
+        /// <summary>
+        /// Returns a flattened invalid-action mask matching ActionManager.GetActionSpaceShape().
+        /// 1 means the action value is valid, 0 means it should be masked out.
+        /// </summary>
+        int[] GetActionMask(HeroController hero, HealthManager boss);
+
+        /// <summary>
+        /// Returns the preferred horizontal center for macro movement options.
+        /// Encounters with a safe platform should return that platform's center.
+        /// </summary>
+        float GetPreferredCenterX();
+
+        /// <summary>
+        /// Returns whether the boss is currently in a dangerous/active attack state.
+        /// Used by macro actions to choose safer low-level movement.
+        /// </summary>
+        bool IsBossDangerous(HeroController hero, HealthManager boss);
+
+        /// <summary>
+        /// Returns a rule-based teacher macro action for the current state.
+        /// This is used as an online auxiliary target for the policy.
+        /// </summary>
+        MacroAction GetTeacherAction(HeroController hero, HealthManager boss, int[] actionMask);
+
+        /// <summary>
+        /// Returns whether normal movement macros should be converted into short basic-attack taps.
+        /// </summary>
+        bool ShouldForceBasicAttack();
+
+        /// <summary>
+        /// Clamps a horizontal movement direction so sustained actions cannot walk off a safe arena platform.
+        /// </summary>
+        MoveDirection ClampMovementToSafeArea(HeroController hero, MoveDirection requestedDirection);
 
         /// <summary>
         /// Returns the size of the observation array for this encounter.
@@ -72,10 +153,24 @@ namespace SilksongRL
         int GetObservationSize();
 
         /// <summary>
+        /// Clears any temporal observation state such as frame stacking.
+        /// Call this when an episode or scene reset starts.
+        /// </summary>
+        void ResetObservationHistory();
+
+        /// <summary>
         /// Calculates the reward for the current transition.
         /// Each encounter can define its own reward function.
         /// </summary>
-        float CalculateReward(float[] previousObservations, float[] currentObservations, int whoDied);
+        /// 待优化：不一定每个boss专门定义一个专属reword，而是期望训练出更泛化的打boss策略
+        float CalculateReward(float[] previousObservations, float[] currentObservations, Action previousAction, int whoDied);
+
+        RewardComponents GetLastRewardComponents();
+
+        /// <summary>
+        /// Creates a terminal next observation when the live boss or hero object is already gone.
+        /// </summary>
+        float[] CreateTerminalObservation(float[] previousObservations, int whoDied);
 
         /// <summary>
         /// Checks if the hero is stuck.
@@ -121,6 +216,11 @@ namespace SilksongRL
         /// </summary>
         bool IsResetComplete(HeroController hero, HealthManager boss);
         */
+
+        //以上三个函数可能会尝试启用，假设我希望进行这样的训练：
+        //对于多个用于训练的boss，不论输赢，总是一个个循环挑战过去
+        //那么单靠DebugMod savestate / Quickslot可能不行，
+        //需要以上三个函数来在游戏内调整挑战的boss
     }
 }
 

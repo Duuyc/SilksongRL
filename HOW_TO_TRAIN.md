@@ -1,99 +1,139 @@
-# HOW TO TRAIN
+# Training Workflow
 
-Here I will give an overview of how to actually run the training. This assumes you have followed the set up instructions in the README.
+This guide assumes the Python dependencies are installed and `SilksongRL.dll`
+is present in the active BepInEx profile. The system controls a real game
+process, so a repeatable save state is part of the environment setup.
 
+## 1. Configure the Python Backend
 
-## INITIALIZE THE SOCKET
+Create `python-client/server_config.json` from the example:
 
-To initialize the socket which enables the communication between Silksong and the training script you need to run the launch.py file from the python-client.
+```powershell
+cd python-client
+Copy-Item server_config.example.json server_config.json
+python launch.py
+```
 
-You can run this however you like.
-Personally, I just do `start /B "" .venv\Scripts\python.exe launch.py` in the directory where the python-client is to start it as a background process.
+The server waits on `localhost:8000` by default. Start it before enabling agent
+control in the game.
 
+## 2. Configure the BepInEx Plugin
 
-<img width="1919" height="1030" alt="image" src="https://github.com/user-attachments/assets/9e28422a-e8ec-47f7-8224-3711fb7bcd86" />
+Run the game once to generate `BepInEx/config/silksongrl.cfg`, then edit the
+relevant values:
 
+| Section/key | Purpose | Default |
+| --- | --- | --- |
+| `Connection.Host` | Python server host | `localhost` |
+| `Connection.Port` | Python server port | `8000` |
+| `Training.TargetBoss` | Encounter key such as `Lace_1` or `Lace_2` | `Lace_1` |
+| `Training.StepInterval` | Observation/reward sampling interval | `0.05` |
+| `Training.DecisionInterval` | Minimum interval between new policy decisions | `0.05` |
+| `Training.StepMode` | Pause between decisions and advance fixed physics frames | `true` |
+| `Training.StepModeFrames` | Physics frames advanced per sample in step mode | `3` |
+| `Training.EvalMode` | Deterministic inference without training transitions | `false` |
+| `Training.EvalStatsWindow` | Episodes per printed evaluation summary | `25` |
+| `Recorder.DemoRoot` | Human demonstration output directory | Unity persistent data |
+| `Debug.HitboxDebug` | Initial collider logger state | `false` |
+| `Debug.BossFsmDebug` | Initial FSM logger state | `false` |
 
-## START THE GAME
+Restart the game after changing BepInEx configuration.
 
-Once you start the game, you should see the BepInEx console also open alongside it. If everything so far has gone correctly,
-top right should list the mods you have active and in the console you will be able to see whichever encounter you have initialized the system for.
-The default starting encounter is Lace 1.
+## 3. Prepare a Repeatable Encounter
 
-<img width="1627" height="920" alt="image" src="https://github.com/user-attachments/assets/b93667c3-0667-45de-b8fa-effa3ff2c473" />
+1. Navigate to the target boss with agent control disabled.
+2. Use Silksong.DebugMod to create a save state immediately before combat.
+3. Put that save state in the DebugMod quick slot.
+4. Bind quick-slot load to `F5`.
+5. Verify that pressing `F5` restores the same hero position, resources, and
+   boss state.
 
-<br>
-<br>
+The episode manager simulates `F5` after terminal states. A bad or transitional
+save state will produce noisy resets and unreliable training data.
 
-Once you open a savefile, the DebugMod overlay should appear, which looks like this (if it isn't on by default press F2 to activate).
-Make sure to give yourself ten masks, as the health normalization is set up to work with that many. It's not going to break if you don't do that but I would advise against it. Extra health means longer episodes means more learning.
+## 4. Start Training
 
-<br>
+1. Start `python launch.py` and wait for `Waiting for connection...`.
+2. Start Silksong through the profile containing BepInEx, DebugMod, and
+   `SilksongRL.dll`.
+3. Load the prepared save and enter the configured encounter.
+4. Confirm the BepInEx console reports the expected boss, observation size,
+   action space, and socket connection.
+5. Press `P` to enable agent control.
 
+Press `P` again to return control to the player. Do not manually control the
+hero while an online training episode is active.
 
-<img width="1614" height="910" alt="image" src="https://github.com/user-attachments/assets/5e0f7e9b-39e0-43a4-97a6-18af922876d8" />
+## 5. Runtime Controls
 
-<br>
-<br>
+| Key | Function |
+| --- | --- |
+| `P` | Toggle agent control/training |
+| `F5` | DebugMod quick-load reset; also used automatically between episodes |
+| `F6` | Toggle human demonstration recording while agent control is off |
+| `F7` | Toggle relevant Collider2D/hitbox logging every 0.5 seconds |
+| `F8` | Toggle active boss PlayMaker FSM-state logging every 0.5 seconds |
 
-<img width="1617" height="914" alt="image" src="https://github.com/user-attachments/assets/f04117ca-20db-48b3-8bcc-10ae44b7bf26" />
+The debug loggers are intended for encounter development and should normally
+remain disabled during long training runs.
 
+## 6. Record Human Demonstrations
 
-## NAVIGATE TO THE DESIRED ENCOUNTER
+1. Disable agent control with `P`.
+2. Press `F6` and play the encounter manually.
+3. Reset or finish episodes normally; the recorder writes one `.jsonl` file per
+   episode.
+4. Press `F6` again to stop recording and close the active file.
 
-Unfortunately, you'll have to get to the boss you want to fight manually. Only the first time, though! Promise. The DebugMod has a very helpful noclip mode that you can use to phase through walls and get to where you want quickly.
-(In the future, I might look into providing ready SaveState information so you can open it straight up from there but if you're reading this it's not available yet)
+Copy the resulting boss folder into `python-client/demos/` before running BC or
+predictor training. Demonstrations are local data and are ignored by Git.
 
+## 7. Behavior-Cloning Warm Start
 
-Once you have reached to the boss you need to get into a position that triggers the fight, pause and set your SaveState by pressing "Write", as shown below. I am using Lace 2 as an example here but this is the same for every boss.
+```powershell
+cd python-client
+python train_bc.py --demo-dir demos\lace_1 --boss-name "Lace Boss1" `
+  --epochs 40 --respect-masks
+```
 
-<img width="1611" height="905" alt="image" src="https://github.com/user-attachments/assets/e0ee151a-b4c6-4fb5-8499-7ebd5d27716c" />
+Use `python train_bc.py --help` to inspect weighting options. BC initializes the
+policy and Frame Encoder; online PPO remains responsible for optimizing the
+actual reward in the game.
 
-<br>
-<br>
+## 8. Evaluation
 
-Congratulations, you now have a SaveState! These persist across runs, so any time you want to return to this encounter you can do it with just a few clicks.
-If you now press "Read", it sets the selected SaveStatestate into your Quickslot.
+Set the following in `silksongrl.cfg` and restart the game:
 
-<img width="1607" height="896" alt="image" src="https://github.com/user-attachments/assets/0ae8f443-b798-48b5-931f-26e1a2e53b67" />
+```ini
+[Training]
+EvalMode = true
+EvalStatsWindow = 25
+```
 
-<br>
-<br>
+Evaluation mode loads a checkpoint, uses deterministic action selection, and
+does not store transitions or update model weights. The BepInEx console prints
+per-episode outcomes plus win rate and mean boss HP remaining for each window.
 
-Enable the "Load Quickslot on Death" setting by pressing the highlighted button. 
+## 9. Checkpoints and Local Data
 
-<img width="1608" height="907" alt="image" src="https://github.com/user-attachments/assets/bb6e86ae-151e-4c56-81b2-e0969ee6f587" />
+- PPO: `python-client/models/<normalized-boss-name>/`
+- DQN: `python-client/dqn_models/<model-name>/`
+- Future predictor: `python-client/predictors/<normalized-boss-name>/`
+- Demonstrations: `python-client/demos/<boss-key>/`
+- Optional agent traces: `python-client/agent_traces/<boss-key>/`
 
-<br>
-<br>
+These paths are excluded from source control. Back them up separately if an
+experiment must be preserved.
 
-Bind Quickslot (Load) to F5. This is how we reset when the agent wins.
+## Troubleshooting
 
-<img width="1616" height="913" alt="image" src="https://github.com/user-attachments/assets/5dcba72d-99ef-48ac-a3b2-1c54bfc77185" />
-
-## AND... TRAIN!
-
-Press F2 to close the DebugMod UI (this is not important for Lace 1, but other encounters, such as Lace 2 use visual state information, so the the UI will mess with their performance)
-
-Unpause and press P! You should see your agent start to move on it's own. It's training now! Wish it luck, because it's certainly going to need it.
-
-
-## CHANGING ENCOUNTERS
-
-If you wish to try out another boss, head to your game installation, get inside `BepInEx/config`, open the silksongrl.cfg file
-and set TargetBoss to the one you want.
-
-<img width="1906" height="889" alt="image" src="https://github.com/user-attachments/assets/a458dafc-31d3-4614-8197-fab1c29a3c28" />
-
-
-### NOTES:
-
-- You can increase the timescale throught Debug mod and the training will function fine as the steps are executed in Unity's FixedUpdate.
-
-- If you want to load saved model weights, you will need to first run the game once with the desired boss selected to create the folder structure. Then, put checkpoint.zip into the `models/"boss_name"/` folder. It should now load the trained agent when you run it.
-
-- As this system runs in real time rather than assuming full control of the game, there will be slight deviations in the latency with which things run on different machines. This shouldn't cause too big of an issue. That being said, performance may degrade slightly if we try a model that is used to a certain amount of ms on an environment with less or more.
-
-- To play, the agent relies on key presses. This means that if you don't have the default key bindings, it will be pressing the wrong buttons.
-
-- For encounters that have a visual observation, your resolution and video settings matter. On a different aspect ratio or with more/less particles, shadows etc. the agent's input will not be the same. I'm not quite sure how catastrophic this would be for performance but it will most definitely have an effect. 
+- **The server waits forever:** the game plugin has not connected, host/port do
+  not match, or a firewall is blocking localhost.
+- **Observation/action dimensions mismatch:** the checkpoint was trained with a
+  different encounter, observation schema, frame stack, or action space.
+- **Episodes reset inconsistently:** recreate the save state outside scene
+  transitions and increase `F5RetryInterval` if DebugMod is still loading.
+- **The agent presses wrong controls:** this system emits game inputs and assumes
+  compatible bindings.
+- **Training timing changes:** keep `StepInterval`, `DecisionInterval`, step
+  mode, and timescale consistent with the checkpoint being evaluated.

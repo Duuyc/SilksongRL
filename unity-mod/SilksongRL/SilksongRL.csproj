@@ -12,8 +12,9 @@
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
-    <!-- Game installation directory - override in SilksongRL.csproj.user -->
-    <GameDir Condition=" '$(GameDir)' == '' ">D:\Steam\steamapps\common\Hollow Knight Silksong</GameDir>
+    <!-- Override in SilksongRL.csproj.user or set SILKSONG_GAME_DIR. -->
+    <GameDir Condition=" '$(GameDir)' == '' and '$(SILKSONG_GAME_DIR)' != '' ">$(SILKSONG_GAME_DIR)</GameDir>
+    <GameDir Condition=" '$(GameDir)' == '' ">C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight Silksong</GameDir>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <DebugSymbols>true</DebugSymbols>
@@ -114,6 +115,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ActionManager.cs" />
+    <Compile Include="BossFsmDebugLogger.cs" />
+    <Compile Include="DemonstrationRecorder.cs" />
+    <Compile Include="HitboxDebugLogger.cs" />
+    <Compile Include="Encounters\BossEncounterBase.cs" />
     <Compile Include="Encounters\IBossEncounter.cs" />
     <Compile Include="Encounters\LaceEncounter.cs" />
     <Compile Include="Encounters\LaceSecondEncounter.cs" />
